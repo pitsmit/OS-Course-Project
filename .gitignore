@@ -7,7 +7,7 @@
 *.log
 *.out
 *.run.xml
-*.syntex.gz
+*.synctex.gz
 *.toc
 
 *.exe
