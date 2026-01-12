@@ -11,5 +11,5 @@
 #Сектор Z: Корневой каталог
 #Сектор N: Область данных
 
-
+# lsblk
 # sudo mkfs.vfat -F 32 -n MYFLASH /dev/sda1
