@@ -1,0 +1,11 @@
+* MYFLASH1 tree
+.
+   jest
+        config
+            jest.config.factory.js
+            jest.config.js
+        setup
+            jest.polyfills.js
+            jest.setup.ts
+
+4 directories, 4 files

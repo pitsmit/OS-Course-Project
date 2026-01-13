@@ -1,0 +1,23 @@
+version: '3.8'
+services:
+  express:
+    build: ./express
+    container_name: express-app
+    environment:
+      - DATABASE_NAME=anekdot_test
+      - HOST=postgres
+      - PORT=5432
+      - USER=postgres
+      - PASSWORD=password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+    ports:
+      - "3000:3000"
+    networks:
+      - benchmark

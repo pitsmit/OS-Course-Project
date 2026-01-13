@@ -1,0 +1,3 @@
+#define VENDOR_ID   0x0dd8
+#define PRODUCT_ID  0x3801
+#define VOLUME_NAME "MYFLASH"
