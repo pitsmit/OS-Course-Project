@@ -1,0 +1,9 @@
+struct kprobe {
+	...
+	kprobe_opcode_t *addr;
+	const char *symbol_name;
+	...
+	kprobe_pre_handler_t pre_handler;
+	kprobe_post_handler_t post_handler;
+	...
+};
