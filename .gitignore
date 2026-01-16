@@ -9,6 +9,5 @@
 *.run.xml
 *.synctex.gz
 *.toc
-
-*.exe
 *.o
+tree.txt
