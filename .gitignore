@@ -10,4 +10,16 @@
 *.synctex.gz
 *.toc
 *.o
+
 tree.txt
+tree-2.txt
+set_ftrace_pid
+
+*.symvers
+*.order
+*.ko
+*.mod
+*.mod.c
+*.o
+*.cmd
+*.save

