@@ -9,11 +9,10 @@
 *.run.xml
 *.synctex.gz
 *.toc
-*.o
+*.bbl-SAVE-ERROR
 
 tree.txt
 tree-2.txt
-set_ftrace_pid
 
 *.symvers
 *.order
@@ -23,3 +22,6 @@ set_ftrace_pid
 *.o
 *.cmd
 *.save
+
+theory.md
+compress.sh
